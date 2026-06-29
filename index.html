@@ -502,39 +502,152 @@ const QUOTAS = { vacation: 6, personal: 7, personalPaid: 3, sick: 30 };
 /* ลากิจ: สิทธิ์ทั้งหมด 7 วัน แต่ได้รับค่าจ้าง 3 วันแรก */
 /* พักร้อนตามสัดส่วน: อายุงาน < 1 ปี → นับ 1 วันต่อทุก 2 เดือนเต็ม */
 function computeVacationQuota(emp) {
-  // ลองดึงวันเริ่มงานจากชื่อพนักงาน (รูปแบบ d/M/YY หรือ d/M/YYYY หรือ d/M/BBBB)
   const nameStr = emp.name || '';
   const dateMatch = nameStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (!dateMatch) return QUOTAS.vacation; // ไม่มีวันที่ → ใช้โควตาเต็ม
+  if (!dateMatch) return QUOTAS.vacation;
   let d = parseInt(dateMatch[1]), mo = parseInt(dateMatch[2]), y = parseInt(dateMatch[3]);
-  if (y < 100) y += 2500; // 2-digit year
-  if (y > 2400) y -= 543; // แปลง พ.ศ. → ค.ศ.
+  if (y < 100) y += 2500;
+  if (y > 2400) y -= 543;
   const startDate = new Date(y, mo - 1, d);
   if (isNaN(startDate.getTime())) return QUOTAS.vacation;
-  const refDate = new Date(2026, 11, 31); // 31 ธ.ค. 2026 = สิ้นปี
+  const refDate = new Date(2026, 11, 31);
   const diffMs = refDate - startDate;
   if (diffMs < 0) return QUOTAS.vacation;
   const diffDays = diffMs / (1000 * 60 * 60 * 24);
   const diffYears = diffDays / 365.25;
-  if (diffYears >= 1) return QUOTAS.vacation; // อายุงาน >= 1 ปี → โควตาเต็ม
-  // อายุงาน < 1 ปี → 1 วันต่อ 2 เดือนเต็ม (นับจากวันที่เริ่มงานถึงสิ้นปี)
+  if (diffYears >= 1) return QUOTAS.vacation;
   const fullMonths = Math.floor(diffDays / 30.4375);
-  return Math.floor(fullMonths / 2); // ทุก 2 เดือน = 1 วัน
+  return Math.floor(fullMonths / 2);
 }
 const ADMIN_PASSWORD = 'hr2569';
 
-let dobMap = {}; // reused as pinMap: stores custom PINs (if not set, default = last 4 of employee ID)
+/* ===================== GAS Config ===================== */
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbyuyyyw0muvjC490FNdUJyzH3Uxa-duukBm-V7lM807chSwNbS0IVDgJKchJVtCB6dvbg/exec';
+
+let dobMap = {};        // PIN map: { empId: pin }
 let dataOverride = {};
-let supervisorMap = {}; // { supervisorId: [subId, subId, ...] }
-try { dobMap = JSON.parse(localStorage.getItem('hr_dob_v1') || '{}'); } catch (e) { dobMap = {}; }
-try { dataOverride = JSON.parse(localStorage.getItem('hr_data_override_v1') || '{}'); } catch (e) { dataOverride = {}; }
-try { supervisorMap = JSON.parse(localStorage.getItem('hr_supervisor_v1') || '{}'); } catch (e) { supervisorMap = {}; }
-try {
-  const mo = JSON.parse(localStorage.getItem('hr_months_order_v1') || 'null');
-  const ml = JSON.parse(localStorage.getItem('hr_month_labels_v1') || 'null');
-  if (mo) mo.forEach(k => { if (!HR_DATA.meta.monthsOrder.includes(k)) HR_DATA.meta.monthsOrder.push(k); });
-  if (ml) Object.assign(HR_DATA.meta.monthLabels, ml);
-} catch (e) {}
+let supervisorMap = {}; // { supervisorId: [subId, ...] }
+
+/* --- localStorage keys (ใช้เป็น cache เท่านั้น) --- */
+const LS_PIN      = 'hr_dob_v1';
+const LS_SUP      = 'hr_supervisor_v1';
+const LS_OVERRIDE = 'hr_data_override_v1';
+const LS_MO       = 'hr_months_order_v1';
+const LS_ML       = 'hr_month_labels_v1';
+
+/* ===================== GAS API helpers ===================== */
+async function gasGet(action) {
+  const res = await fetch(`${GAS_URL}?action=${action}`, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+async function gasPost(action, payload) {
+  const res = await fetch(GAS_URL, {
+    method: 'POST', redirect: 'follow',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify({ action, payload })
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+/* ===================== Save helpers (Sheets + cache) ===================== */
+function savePinMap() {
+  localStorage.setItem(LS_PIN, JSON.stringify(dobMap));
+  gasPost('savePins', dobMap).catch(console.warn);
+}
+function saveSupervisorMap() {
+  localStorage.setItem(LS_SUP, JSON.stringify(supervisorMap));
+  gasPost('saveSupervisors', supervisorMap).catch(console.warn);
+}
+
+/* ===================== Loading overlay ===================== */
+function showLoadingOverlay(msg) {
+  let el = document.getElementById('gasLoadingOverlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'gasLoadingOverlay';
+    el.style.cssText = `
+      position:fixed;inset:0;z-index:9999;
+      background:rgba(13,59,31,.55);backdrop-filter:blur(4px);
+      display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+    `;
+    el.innerHTML = `
+      <div style="width:48px;height:48px;border:4px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:gasSpinner .7s linear infinite;"></div>
+      <div id="gasLoadingMsg" style="color:#fff;font-family:'Kanit',sans-serif;font-size:16px;font-weight:600;"></div>
+      <style>@keyframes gasSpinner{to{transform:rotate(360deg)}}</style>
+    `;
+    document.body.appendChild(el);
+  }
+  document.getElementById('gasLoadingMsg').textContent = msg || 'กำลังโหลดข้อมูล...';
+  el.style.display = 'flex';
+}
+function hideLoadingOverlay() {
+  const el = document.getElementById('gasLoadingOverlay');
+  if (el) el.style.display = 'none';
+}
+function showSyncBadge(ok) {
+  let badge = document.getElementById('gasSyncBadge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'gasSyncBadge';
+    badge.style.cssText = 'position:fixed;bottom:18px;right:18px;z-index:9000;padding:8px 14px;border-radius:999px;font-size:13px;font-family:Sarabun,sans-serif;font-weight:600;box-shadow:0 2px 10px rgba(0,0,0,.15);transition:opacity .4s;';
+    document.body.appendChild(badge);
+  }
+  if (ok) {
+    badge.style.background = '#dcfce7'; badge.style.color = '#166534';
+    badge.textContent = '✓ ซิงค์กับ Google Sheets แล้ว';
+  } else {
+    badge.style.background = '#fee2e2'; badge.style.color = '#dc2626';
+    badge.textContent = '⚠ ใช้ข้อมูลแคช (ออฟไลน์)';
+  }
+  badge.style.opacity = '1';
+  setTimeout(() => { badge.style.opacity = '0'; }, 3000);
+}
+
+/* ===================== Init: load from GAS then start ===================== */
+async function initApp() {
+  showLoadingOverlay('กำลังโหลดข้อมูลจาก Google Sheets...');
+
+  // load localStorage cache ก่อน (instant)
+  try { dobMap       = JSON.parse(localStorage.getItem(LS_PIN)      || '{}'); } catch(e) { dobMap = {}; }
+  try { dataOverride = JSON.parse(localStorage.getItem(LS_OVERRIDE) || '{}'); } catch(e) { dataOverride = {}; }
+  try { supervisorMap= JSON.parse(localStorage.getItem(LS_SUP)      || '{}'); } catch(e) { supervisorMap = {}; }
+  try {
+    const mo = JSON.parse(localStorage.getItem(LS_MO) || 'null');
+    const ml = JSON.parse(localStorage.getItem(LS_ML) || 'null');
+    if (mo) mo.forEach(k => { if (!HR_DATA.meta.monthsOrder.includes(k)) HR_DATA.meta.monthsOrder.push(k); });
+    if (ml) Object.assign(HR_DATA.meta.monthLabels, ml);
+  } catch(e) {}
+
+  // ดึงจาก Sheets (PIN + Supervisor)
+  let sheetsOk = false;
+  try {
+    const [pinRes, supRes] = await Promise.all([
+      gasGet('getPins'),
+      gasGet('getSupervisors')
+    ]);
+    if (pinRes && typeof pinRes === 'object' && !pinRes.error) {
+      dobMap = pinRes;
+      localStorage.setItem(LS_PIN, JSON.stringify(dobMap));
+    }
+    if (supRes && typeof supRes === 'object' && !supRes.error) {
+      supervisorMap = supRes;
+      localStorage.setItem(LS_SUP, JSON.stringify(supervisorMap));
+    }
+    sheetsOk = true;
+  } catch(e) {
+    console.warn('GAS fetch failed, using localStorage cache:', e);
+    sheetsOk = false;
+  }
+
+  hideLoadingOverlay();
+  showSyncBadge(sheetsOk);
+  showLogin();
+}
+
+/* kick off */
+initApp();
 
 /* ===================== Helpers ===================== */
 function fmtNum(n) {
@@ -983,13 +1096,13 @@ async function handleExcelImport(file) {
     }
     if (monthTouched) updatedMonths.push(sheetName);
   });
-  localStorage.setItem('hr_data_override_v1', JSON.stringify(dataOverride));
+  localStorage.setItem(LS_OVERRIDE, JSON.stringify(dataOverride));
   updatedMonths.forEach(mk => {
     if (!HR_DATA.meta.monthsOrder.includes(mk)) HR_DATA.meta.monthsOrder.push(mk);
     if (!HR_DATA.meta.monthLabels[mk]) HR_DATA.meta.monthLabels[mk] = mk;
   });
-  localStorage.setItem('hr_months_order_v1', JSON.stringify(HR_DATA.meta.monthsOrder));
-  localStorage.setItem('hr_month_labels_v1', JSON.stringify(HR_DATA.meta.monthLabels));
+  localStorage.setItem(LS_MO, JSON.stringify(HR_DATA.meta.monthsOrder));
+  localStorage.setItem(LS_ML, JSON.stringify(HR_DATA.meta.monthLabels));
   return { updatedEmployees, updatedMonths };
 }
 
@@ -1117,7 +1230,7 @@ function renderAdminPanel() {
   function saveAndRefreshSummary() {
     const subs = supervisorMap[selectedSupId] || [];
     if (subs.length === 0) delete supervisorMap[selectedSupId];
-    localStorage.setItem('hr_supervisor_v1', JSON.stringify(supervisorMap));
+    saveSupervisorMap();
     // update summary strip
     const supIdsNow = Object.keys(supervisorMap).filter(id => (supervisorMap[id]||[]).length > 0);
     document.getElementById('supSummary').innerHTML = supIdsNow.length
@@ -1247,7 +1360,7 @@ function renderAdminPanel() {
     if (!selectedSupId) return;
     if (!confirm(`ยืนยันลบสิทธิ์หัวหน้าของ ${employees[selectedSupId].name}?\nลูกน้องทั้งหมดจะกลับสู่คลังพนักงาน`)) return;
     delete supervisorMap[selectedSupId];
-    localStorage.setItem('hr_supervisor_v1', JSON.stringify(supervisorMap));
+    saveSupervisorMap();
     selectedSupId = null;
     document.getElementById('selSupName').textContent = '— กรุณาเลือกหัวหน้า —';
     document.getElementById('subChips').innerHTML = '<span style="color:var(--ink-muted);font-size:12.5px;" id="subChipsEmpty">เลือกหัวหน้าก่อน</span>';
@@ -1303,7 +1416,8 @@ function renderAdminPanel() {
           delete dobMap[id]; // val is empty or same as default → revert to default
           inp.value = '';
         }
-        localStorage.setItem('hr_dob_v1', JSON.stringify(dobMap));
+        localStorage.setItem(LS_PIN, JSON.stringify(dobMap));
+        savePinMap();
         document.getElementById('dobCount').textContent = Object.keys(dobMap).length;
         const tag = inp.closest('tr').querySelector('.savedtag');
         tag.classList.add('show'); setTimeout(() => tag.classList.remove('show'), 1500);
@@ -1316,7 +1430,8 @@ function renderAdminPanel() {
       btn.addEventListener('click', () => {
         const id = btn.dataset.id;
         delete dobMap[id];
-        localStorage.setItem('hr_dob_v1', JSON.stringify(dobMap));
+        localStorage.setItem(LS_PIN, JSON.stringify(dobMap));
+        savePinMap();
         document.getElementById('dobCount').textContent = Object.keys(dobMap).length;
         paintRows(document.getElementById('adminSearch').value);
       });
@@ -1328,7 +1443,8 @@ function renderAdminPanel() {
   document.getElementById('btnResetAllPins').addEventListener('click', () => {
     if (!confirm('รีเซ็ต PIN ทุกคนเป็นค่าเริ่มต้น (4 ตัวท้ายรหัสพนักงาน)?\nPIN ที่กำหนดเองทั้งหมดจะถูกลบ')) return;
     dobMap = {};
-    localStorage.setItem('hr_dob_v1', JSON.stringify(dobMap));
+    localStorage.setItem(LS_PIN, JSON.stringify(dobMap));
+    savePinMap();
     document.getElementById('dobCount').textContent = '0';
     paintRows(document.getElementById('adminSearch').value);
   });
@@ -1345,7 +1461,8 @@ function renderAdminPanel() {
       if (pin === defaultPin) { delete dobMap[id]; } else { dobMap[id] = pin; }
       ok++;
     });
-    localStorage.setItem('hr_dob_v1', JSON.stringify(dobMap));
+    localStorage.setItem(LS_PIN, JSON.stringify(dobMap));
+    savePinMap();
     document.getElementById('dobCount').textContent = Object.keys(dobMap).length;
     paintRows(document.getElementById('adminSearch').value);
     const res = document.getElementById('csvImportResult');
@@ -1388,9 +1505,9 @@ function renderAdminPanel() {
   document.getElementById('btnResetOverride').addEventListener('click', () => {
     if (!confirm('ยืนยันล้างข้อมูลเดือนที่นำเข้าทั้งหมด?')) return;
     dataOverride = {};
-    localStorage.removeItem('hr_data_override_v1');
-    localStorage.removeItem('hr_months_order_v1');
-    localStorage.removeItem('hr_month_labels_v1');
+    localStorage.removeItem(LS_OVERRIDE);
+    localStorage.removeItem(LS_MO);
+    localStorage.removeItem(LS_ML);
     location.reload();
   });
 }
@@ -1401,7 +1518,7 @@ document.getElementById('inEmpId').addEventListener('keydown', e => { if (e.key 
 document.getElementById('inDob').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 document.getElementById('lnkAdmin').addEventListener('click', showAdminPasswordGate);
 
-showLogin();
+/* initApp() จะเรียก showLogin() เองหลังโหลดข้อมูล */
 
 
 </script>
