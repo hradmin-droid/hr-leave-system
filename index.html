@@ -436,7 +436,7 @@
       <div class="mark">HR</div>
       <div>
         <div class="title">ระบบเช็ควันลาพนักงาน</div>
-        <div class="sub">หจก.แม่สุเพ็ญ · ดูวันลาและสถิติการมาทำงาน</div>
+        <div class="sub">หจก.สุเพ็ญน้ำพริกแกง · ดูวันลาและสถิติการมาทำงาน</div>
       </div>
     </div>
     <div id="topbarRight"></div>
@@ -929,7 +929,15 @@ async function handleExcelImport(file) {
   const fieldKey = { 'รวมมา':'present','รวมลา':'leaveTotal','ลากิจ':'personal','ลาป่วย':'sick','แพทย์':'sickCert','พักร้อน':'vacation','ลาบวช':'ordain','ลาคลอด':'maternity','ขาด':'absent' };
   let updatedEmployees = 0;
   const updatedMonths = [];
+  // ชื่อ sheet ที่ต้อง skip (ซ้ำซ้อนหรือไม่ใช่ข้อมูลหลัก)
+  const SKIP_SHEETS = ['List'];
+  const SKIP_KEYWORDS = ['ส่งพี่แอน', 'ส่งพี่', 'ส่งผู้จัดการ', 'draft', 'copy', 'สำรอง'];
+
   wb.SheetNames.forEach(sheetName => {
+    // skip ถ้าชื่อตรงหรือมีคำที่ไม่ต้องการ
+    if (SKIP_SHEETS.includes(sheetName)) return;
+    if (SKIP_KEYWORDS.some(kw => sheetName.includes(kw))) return;
+
     const ws = wb.Sheets[sheetName];
     const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
     let headerRowIdx = -1;
