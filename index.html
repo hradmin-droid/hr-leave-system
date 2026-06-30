@@ -497,7 +497,7 @@
 
 
 /* ===================== Bootstrap ===================== */
-const HR_DATA = JSON.parse(document.getElementById('hr-data-json').textContent);
+let HR_DATA = JSON.parse(document.getElementById('hr-data-json').textContent);
 const QUOTAS = { vacation: 6, personal: 7, personalPaid: 3, sick: 30 };
 /* ลากิจ: สิทธิ์ทั้งหมด 7 วัน แต่ได้รับค่าจ้าง 3 วันแรก */
 /* พักร้อนตามสัดส่วน: อายุงาน < 1 ปี → นับ 1 วันต่อทุก 2 เดือนเต็ม */
@@ -534,6 +534,7 @@ const LS_SUP      = 'hr_supervisor_v1';
 const LS_OVERRIDE = 'hr_data_override_v1';
 const LS_MO       = 'hr_months_order_v1';
 const LS_ML       = 'hr_month_labels_v1';
+const LS_HR       = 'hr_data_remote_v1';
 
 /* ===================== GAS API helpers ===================== */
 async function gasGet(action) {
@@ -620,12 +621,13 @@ async function initApp() {
     if (ml) Object.assign(HR_DATA.meta.monthLabels, ml);
   } catch(e) {}
 
-  // ดึงจาก Sheets (PIN + Supervisor)
+  // ดึงจาก Sheets (PIN + Supervisor + ข้อมูลพนักงาน/วันลา)
   let sheetsOk = false;
   try {
-    const [pinRes, supRes] = await Promise.all([
+    const [pinRes, supRes, hrRes] = await Promise.all([
       gasGet('getPins'),
-      gasGet('getSupervisors')
+      gasGet('getSupervisors'),
+      gasGet('getHRData')
     ]);
     if (pinRes && typeof pinRes === 'object' && !pinRes.error) {
       dobMap = pinRes;
@@ -635,9 +637,23 @@ async function initApp() {
       supervisorMap = supRes;
       localStorage.setItem(LS_SUP, JSON.stringify(supervisorMap));
     }
+    if (hrRes && typeof hrRes === 'object' && !hrRes.error && hrRes.employees && Object.keys(hrRes.employees).length > 0) {
+      HR_DATA = hrRes;
+      localStorage.setItem(LS_HR, JSON.stringify(HR_DATA));
+    } else {
+      // ดึงไม่สำเร็จหรือชีทยังว่าง ลองใช้แคชล่าสุดที่เคยดึงได้ ถ้าไม่มีค่อย fallback ไปใช้ข้อมูลที่ฝังในไฟล์
+      try {
+        const cached = JSON.parse(localStorage.getItem(LS_HR) || 'null');
+        if (cached && cached.employees && Object.keys(cached.employees).length > 0) HR_DATA = cached;
+      } catch(e) {}
+    }
     sheetsOk = true;
   } catch(e) {
     console.warn('GAS fetch failed, using localStorage cache:', e);
+    try {
+      const cached = JSON.parse(localStorage.getItem(LS_HR) || 'null');
+      if (cached && cached.employees && Object.keys(cached.employees).length > 0) HR_DATA = cached;
+    } catch(e2) {}
     sheetsOk = false;
   }
 
