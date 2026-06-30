@@ -604,6 +604,31 @@ function showSyncBadge(ok) {
   }
   badge.style.opacity = '1';
   setTimeout(() => { badge.style.opacity = '0'; }, 3000);
+
+  ensureRefreshButton();
+}
+
+function ensureRefreshButton() {
+  let btn = document.getElementById('gasRefreshBtn');
+  if (btn) return;
+  btn = document.createElement('button');
+  btn.id = 'gasRefreshBtn';
+  btn.type = 'button';
+  btn.textContent = '🔄 รีเฟรชข้อมูลจาก Sheets';
+  btn.style.cssText = 'position:fixed;bottom:18px;left:18px;z-index:9000;padding:8px 14px;border-radius:999px;font-size:13px;font-family:Sarabun,sans-serif;font-weight:600;border:1px solid #d1d5db;background:#fff;color:#374151;box-shadow:0 2px 10px rgba(0,0,0,.15);cursor:pointer;';
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = '🔄 กำลังรีเฟรช...';
+    try {
+      localStorage.removeItem(LS_HR);
+      localStorage.removeItem(LS_PIN);
+      localStorage.removeItem(LS_SUP);
+      localStorage.removeItem(LS_MO);
+      localStorage.removeItem(LS_ML);
+    } catch(e) {}
+    location.reload();
+  };
+  document.body.appendChild(btn);
 }
 
 /* ===================== Init: load from GAS then start ===================== */
@@ -624,11 +649,16 @@ async function initApp() {
   // ดึงจาก Sheets (PIN + Supervisor + ข้อมูลพนักงาน/วันลา)
   let sheetsOk = false;
   try {
-    const [pinRes, supRes, hrRes] = await Promise.all([
+    const [pinSettled, supSettled, hrSettled] = await Promise.allSettled([
       gasGet('getPins'),
       gasGet('getSupervisors'),
       gasGet('getHRData')
     ]);
+    const pinRes = pinSettled.status === 'fulfilled' ? pinSettled.value : null;
+    const supRes = supSettled.status === 'fulfilled' ? supSettled.value : null;
+    const hrRes  = hrSettled.status  === 'fulfilled' ? hrSettled.value  : null;
+    if (hrSettled.status === 'rejected') console.warn('getHRData failed:', hrSettled.reason);
+
     if (pinRes && typeof pinRes === 'object' && !pinRes.error) {
       dobMap = pinRes;
       localStorage.setItem(LS_PIN, JSON.stringify(dobMap));
@@ -637,17 +667,19 @@ async function initApp() {
       supervisorMap = supRes;
       localStorage.setItem(LS_SUP, JSON.stringify(supervisorMap));
     }
+    let hrOk = false;
     if (hrRes && typeof hrRes === 'object' && !hrRes.error && hrRes.employees && Object.keys(hrRes.employees).length > 0) {
       HR_DATA = hrRes;
       localStorage.setItem(LS_HR, JSON.stringify(HR_DATA));
+      hrOk = true;
     } else {
       // ดึงไม่สำเร็จหรือชีทยังว่าง ลองใช้แคชล่าสุดที่เคยดึงได้ ถ้าไม่มีค่อย fallback ไปใช้ข้อมูลที่ฝังในไฟล์
       try {
         const cached = JSON.parse(localStorage.getItem(LS_HR) || 'null');
-        if (cached && cached.employees && Object.keys(cached.employees).length > 0) HR_DATA = cached;
+        if (cached && cached.employees && Object.keys(cached.employees).length > 0) { HR_DATA = cached; hrOk = true; }
       } catch(e) {}
     }
-    sheetsOk = true;
+    sheetsOk = !!(pinRes && supRes && hrOk);
   } catch(e) {
     console.warn('GAS fetch failed, using localStorage cache:', e);
     try {
